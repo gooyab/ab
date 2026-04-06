@@ -1,79 +1,130 @@
 import React, { useState, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Dimensions, Alert } from 'react-native';
+import {
+  StyleSheet,
+  View,
+  Text,
+  TouchableOpacity,
+  Dimensions,
+  Alert,
+  ActivityIndicator
+} from 'react-native';
 import Pdf from 'react-native-pdf';
 import { supabase, supabaseUrl } from '../supabase';
 
 export default function ReaderScreen({ route }) {
   const { bookId, filePath } = route.params;
+
   const [isHighlightMode, setIsHighlightMode] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [localHighlights, setLocalHighlights] = useState([]);
+  const [totalPages, setTotalPages] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+
   const pdfRef = useRef(null);
 
-  // The Public URL for the book in Supabase Storage
-  const source = { uri: `${supabaseUrl}/storage/v1/object/public/Books/${filePath}`, cache: true };
+  // --- THE FINAL URL LOGIC ---
+  const cleanPath = decodeURIComponent(filePath);
+  const safePath = encodeURIComponent(cleanPath);
+  const baseUrl = supabaseUrl.replace('localhost', '192.168.86.211');
 
-  // 1. COORDINATE MAPPER & SAVE LOGIC
+  // Construct the final URI pointing to James's Port 8000 gateway
+  const correctedUri = `${baseUrl}/storage/v1/object/public/Books/${safePath}`;
+
+const source = { 
+  uri: "http://192.168.86.231:8000/storage/v1/object/public/Books/1775315212783_collie_rob_singh_avi__power_pivot_and_power_bi_the_excel_users_guide_to_dax_power_query_power_bi__power_pivot_in_excel_20102016_2016_holy_macro_books__libgenli.pdf",
+  cache: false 
+};
+
+  // COORDINATE SAVER (James's Feature)
   const handlePageTap = async (page, x, y) => {
     if (!isHighlightMode) return;
 
-    // Convert touch to PDF coordinates
-    // react-native-pdf gives us 'x' and 'y' relative to the page size already
-    // We bundle this into a JSON object for James's table
-    const highlightData = {
-      book_id: bookId,
-      page_number: page,
-      content: "Highlighting...", // In a later task, we can add OCR or Text Extraction
-      coordinates: { x, y, width: 50, height: 20 }, // Placeholder dimensions
-      created_at: new Date()
-    };
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
 
-    // Instant Visual Feedback (Local State)
-    setLocalHighlights([...localHighlights, highlightData]);
+      const { error } = await supabase
+        .from('highlights')
+        .insert({
+          book_id: bookId,
+          user_id: user.id,
+          page_number: page,
+          content: "Pinned Coordinate",
+          coordinates: { x: Math.round(x), y: Math.round(y) }
+        });
 
-    // Save to Supabase (James's Highlights Table)
-    const { error } = await supabase
-      .from('highlights')
-      .insert({
-        book_id: bookId,
-        user_id: (await supabase.auth.getUser()).data.user.id,
-        page_number: page,
-        content: "User Highlight",
-        coordinates: highlightData.coordinates
-      });
-
-    if (error) console.error("Highlight Save Error:", error.message);
+      if (error) throw error;
+      Alert.alert("Saved!", `Pinned at {${Math.round(x)}, ${Math.round(y)}} on page ${page}`);
+    } catch (err) {
+      console.error("Save Error:", err.message);
+      Alert.alert("Save Error", "Could not connect to the highlights table.");
+    }
   };
 
   return (
     <View style={styles.container}>
-      {/* TOOLBAR */}
+      {/* HEADER TOOLBAR */}
       <View style={styles.toolbar}>
-        <Text style={styles.pageIndicator}>Page {currentPage}</Text>
-        <TouchableOpacity 
+        <View>
+          <Text style={styles.pageIndicator}>Page {currentPage} / {totalPages || '...'}</Text>
+          {isLoading && (
+            <Text style={styles.progressText}>
+              Streaming: {Math.round(loadingProgress * 100)}%
+            </Text>
+          )}
+        </View>
+
+        <TouchableOpacity
           style={[styles.modeButton, isHighlightMode && styles.modeButtonActive]}
           onPress={() => setIsHighlightMode(!isHighlightMode)}
         >
-          <Text style={styles.buttonText}>{isHighlightMode ? '📍 Mode: Highlighting' : '🖐️ Mode: Scrolling'}</Text>
+          <Text style={styles.buttonText}>
+            {isHighlightMode ? '📍 PIN MODE' : '🖐️ SCROLL MODE'}
+          </Text>
         </TouchableOpacity>
       </View>
 
-      {/* THE PDF READER */}
+      {/* THE PDF COMPONENT */}
       <Pdf
         ref={pdfRef}
         source={source}
+        // FIX: Set to false for HTTP connections to avoid "Trust Manager" Java errors
+        trustAllCerts={false}
+        onLoadProgress={(percent) => {
+          setLoadingProgress(percent);
+          console.log(`Stream Progress: ${Math.round(percent * 100)}%`);
+        }}
+        onLoadComplete={(numberOfPages) => {
+          setTotalPages(numberOfPages);
+          setIsLoading(false);
+          console.log(`SUCCESS: Rendered ${numberOfPages} pages.`);
+        }}
         onPageChanged={(page) => setCurrentPage(page)}
         onPageSingleTap={(page, x, y) => handlePageTap(page, x, y)}
+        onError={(error) => {
+          setIsLoading(false);
+          console.log('PDF Render Error:', error);
+          Alert.alert(
+            "Reader Error",
+            "The file could not be displayed. Ensure James has the 'Books' bucket set to Public."
+          );
+        }}
         style={styles.pdf}
         enableAntialiasing={true}
-        // This is key: it ensures the PDF fits the screen correctly for our math
-        fitPolicy={0} 
+        fitPolicy={0}
       />
 
-      {/* VISUAL FEEDBACK LAYER (Simplified local drawing) */}
-      {isHighlightMode && (
-        <View style={styles.overlayInstructions}>
-          <Text style={styles.instructionText}>Tap anywhere to place a highlight</Text>
+      {/* LOADING OVERLAY */}
+      {isLoading && (
+        <View style={styles.loaderContainer}>
+          <ActivityIndicator size="large" color="#007BFF" />
+          <Text style={styles.loaderText}>Bypassing the 'Double-Lock'...</Text>
+        </View>
+      )}
+
+      {/* MODE INSTRUCTIONS */}
+      {isHighlightMode && !isLoading && (
+        <View style={styles.instructions}>
+          <Text style={styles.instructionText}>Tap page to save coordinates for James</Text>
         </View>
       )}
     </View>
@@ -81,32 +132,48 @@ export default function ReaderScreen({ route }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#2C2C2C' },
+  container: { flex: 1, backgroundColor: '#121212' },
   pdf: {
     flex: 1,
     width: Dimensions.get('window').width,
     height: Dimensions.get('window').height,
+    backgroundColor: '#121212',
   },
   toolbar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 15,
+    paddingHorizontal: 20,
     paddingTop: 50,
+    paddingBottom: 15,
     backgroundColor: '#FFF',
-    elevation: 5,
+    elevation: 4,
   },
   pageIndicator: { fontWeight: 'bold', fontSize: 16, color: '#333' },
-  modeButton: { padding: 10, borderRadius: 8, backgroundColor: '#EEE', borderWidth: 1, borderColor: '#DDD' },
-  modeButtonActive: { backgroundColor: '#FFD700', borderColor: '#DAA520' },
+  progressText: { fontSize: 10, color: '#007BFF', fontWeight: 'bold' },
+  modeButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: '#F0F0F0'
+  },
+  modeButtonActive: { backgroundColor: '#FFD700' },
   buttonText: { fontWeight: 'bold', fontSize: 12 },
-  overlayInstructions: {
+  loaderContainer: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10
+  },
+  loaderText: { marginTop: 10, fontWeight: '600', color: '#555' },
+  instructions: {
     position: 'absolute',
-    bottom: 50,
+    bottom: 40,
     alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 10,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    padding: 12,
     borderRadius: 20
   },
-  instructionText: { color: '#FFF', fontSize: 12, fontWeight: 'bold' }
+  instructionText: { color: '#FFF', fontWeight: 'bold', fontSize: 12 }
 });

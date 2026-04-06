@@ -1,7 +1,17 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, TextInput, TouchableOpacity, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import { 
+  StyleSheet, 
+  View, 
+  Text, 
+  TextInput, 
+  TouchableOpacity, 
+  ScrollView, 
+  Alert, 
+  ActivityIndicator 
+} from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+// FIX: Using the legacy import as required by Expo SDK 54
+import * as FileSystem from 'expo-file-system/legacy'; 
 import { PDFDocument } from 'pdf-lib';
 import { useNavigation } from '@react-navigation/native';
 import { supabase, supabaseUrl } from '../supabase';
@@ -16,6 +26,25 @@ const DAYS_OF_WEEK = [
   { label: 'Su', value: 'Sunday' },
 ];
 
+/**
+ * SANITIZATION POLICY
+ * Cleans filenames so the PDF Reader doesn't crash on special characters.
+ */
+const sanitizeFileName = (fileName) => {
+  const timestamp = Date.now();
+  const extension = fileName.split('.').pop();
+  let nameOnly = fileName.split('.').slice(0, -1).join('.');
+
+  const cleanName = nameOnly
+    .replace(/\s+/g, '_')           // Spaces to underscores
+    .replace(/[^\x00-\x7F]/g, '')    // Remove Emojis/Persian
+    .replace(/[^a-zA-Z0-9_]/g, '')   // Remove quotes, brackets, etc.
+    .toLowerCase();
+
+  const finalName = cleanName || "book_upload";
+  return `${timestamp}_${finalName}.${extension}`;
+};
+
 export default function CreateGroupScreen() {
   const navigation = useNavigation();
   const [loading, setLoading] = useState(false);
@@ -24,7 +53,7 @@ export default function CreateGroupScreen() {
   const [title, setTitle] = useState('');
   const [capacity, setCapacity] = useState('5');
   const [interval, setInterval] = useState('10');
-  const [selectedDays, setSelectedDays] = useState([]); // Array for Bob's toggle buttons
+  const [selectedDays, setSelectedDays] = useState([]); 
   const [time, setTime] = useState('18:00');
   
   // File State
@@ -33,7 +62,6 @@ export default function CreateGroupScreen() {
 
   const isFormValid = title.trim() !== '' && selectedDays.length > 0 && selectedFile !== null && parsedPageCount > 0;
 
-  // Toggle Day Selection
   const toggleDay = (day) => {
     if (selectedDays.includes(day)) {
       setSelectedDays(selectedDays.filter(d => d !== day));
@@ -45,26 +73,40 @@ export default function CreateGroupScreen() {
   async function handlePickDocument() {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'application/epub+zip'],
+        type: ['application/pdf'],
         copyToCacheDirectory: true,
       });
+      
       if (result.canceled) return;
+      
       const file = result.assets[0];
-      if (file.size > 157286400) {
+      
+      if (file.size > 157286400) { // 150MB
         Alert.alert('File too large', 'Please select a file under 150MB.');
         return;
       }
+
       setSelectedFile(file);
+
+      // PARSING PAGE COUNT
       try {
-        if (file.mimeType === 'application/pdf') {
-          const fileBase64 = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
-          const pdfDoc = await PDFDocument.load(fileBase64);
-          const pages = pdfDoc.getPageCount();
-          setParsedPageCount(pages);
-          Alert.alert('Success', `Parsed ${pages} pages!`);
-        }
-      } catch (e) { setParsedPageCount(0); }
-    } catch (e) { Alert.alert('Error', 'Failed to pick document.'); }
+        // Using 'base64' string directly with the LEGACY FileSystem
+        const fileBase64 = await FileSystem.readAsStringAsync(file.uri, { 
+          encoding: 'base64' 
+        });
+        
+        const pdfDoc = await PDFDocument.load(fileBase64);
+        const pages = pdfDoc.getPageCount();
+        setParsedPageCount(pages);
+        console.log(`Successfully parsed ${pages} pages.`);
+      } catch (e) {
+        console.log("PDF Parse Error:", e.message);
+        setParsedPageCount(0);
+        Alert.alert("Parsing Error", "We couldn't read the page count, but you can still try to upload.");
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Failed to pick document.');
+    }
   }
 
   async function handleSubmit() {
@@ -75,7 +117,9 @@ export default function CreateGroupScreen() {
       const { data: { session } } = await supabase.auth.getSession();
       const user = session.user;
 
-      // STEP 1: Create Group (Database First)
+      const safeFileName = sanitizeFileName(selectedFile.name);
+
+      // 1. Create Group
       const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
       const { data: groupData, error: groupError } = await supabase
         .from('groups')
@@ -85,48 +129,53 @@ export default function CreateGroupScreen() {
           capacity: parseInt(capacity),
           invite_code: inviteCode,
           page_interval: parseInt(interval),
-          meeting_days: selectedDays, // Sending the JS Array ['Monday', 'Wednesday']
+          meeting_days: selectedDays,
           meeting_time: time
         })
         .select().single();
 
       if (groupError) throw groupError;
 
-      // STEP 2: Create Group Member
+      // 2. Member record
       const { error: memberError } = await supabase
         .from('group_members')
         .insert({ group_id: groupData.group_id, user_id: user.id });
 
       if (memberError) throw memberError;
 
-      // STEP 3: Create Book Entry (Link first, upload later)
-      const fileName = `${Date.now()}_${selectedFile.name.replace(/\s/g, '_')}`;
+      // 3. Book Record
       const { error: bookError } = await supabase
         .from('books')
         .insert({
           group_id: groupData.group_id,
-          file_path: fileName, 
-          total_pages: parsedPageCount
+          file_path: safeFileName, 
+          total_pages: parsedPageCount,
+          title: selectedFile.name 
         });
 
       if (bookError) throw bookError;
 
-      // STEP 4: Heavy Upload (Only runs if all DB records are safe)
-      const targetUrl = `${supabaseUrl}/storage/v1/object/Books/${fileName}`;
+      // 4. THE UPLOAD (Legacy FileSystem is great for large uploads)
+      const baseUrl = supabaseUrl.replace('localhost', '192.168.86.211');
+      const targetUrl = `${baseUrl}/storage/v1/object/Books/${safeFileName}`;
+
       const uploadResult = await FileSystem.uploadAsync(targetUrl, selectedFile.uri, {
         httpMethod: 'POST',
         headers: {
           Authorization: `Bearer ${session.access_token}`,
-          'Content-Type': selectedFile.mimeType || 'application/pdf',
+          'Content-Type': 'application/pdf',
         },
       });
 
-      if (uploadResult.status !== 200) throw new Error("File upload failed after DB success.");
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        throw new Error(`Upload failed with status ${uploadResult.status}`);
+      }
 
       Alert.alert('Success!', `Group created! Invite Code: ${inviteCode}`);
       navigation.goBack(); 
       
     } catch (error) {
+      console.error("Submission Error:", error);
       Alert.alert('Error', error.message);
     } finally {
       setLoading(false);
@@ -134,16 +183,33 @@ export default function CreateGroupScreen() {
   }
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 50 }}>
       <Text style={styles.label}>Group Title</Text>
-      <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Design Thinking" />
+      <TextInput 
+        style={styles.input} 
+        value={title} 
+        onChangeText={setTitle} 
+        placeholder="Design Thinking" 
+      />
 
       <View style={styles.row}>
-        <View style={styles.halfInput}><Text style={styles.label}>Capacity</Text>
-          <TextInput style={styles.input} value={capacity} onChangeText={setCapacity} keyboardType="numeric" />
+        <View style={styles.halfInput}>
+          <Text style={styles.label}>Capacity</Text>
+          <TextInput 
+            style={styles.input} 
+            value={capacity} 
+            onChangeText={setCapacity} 
+            keyboardType="numeric" 
+          />
         </View>
-        <View style={styles.halfInput}><Text style={styles.label}>Pages/Session</Text>
-          <TextInput style={styles.input} value={interval} onChangeText={setInterval} keyboardType="numeric" />
+        <View style={styles.halfInput}>
+          <Text style={styles.label}>Pages/Session</Text>
+          <TextInput 
+            style={styles.input} 
+            value={interval} 
+            onChangeText={setInterval} 
+            keyboardType="numeric" 
+          />
         </View>
       </View>
 
@@ -155,25 +221,44 @@ export default function CreateGroupScreen() {
             style={[styles.dayButton, selectedDays.includes(day.value) && styles.dayButtonActive]}
             onPress={() => toggleDay(day.value)}
           >
-            <Text style={[styles.dayText, selectedDays.includes(day.value) && styles.dayTextActive]}>{day.label}</Text>
+            <Text style={[styles.dayText, selectedDays.includes(day.value) && styles.dayTextActive]}>
+              {day.label}
+            </Text>
           </TouchableOpacity>
         ))}
       </View>
 
       <Text style={styles.label}>Meeting Time</Text>
-      <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="18:00" />
+      <TextInput 
+        style={styles.input} 
+        value={time} 
+        onChangeText={setTime} 
+        placeholder="18:00" 
+      />
 
-      <TouchableOpacity style={styles.fileButton} onPress={handlePickDocument}>
-        <Text style={styles.fileButtonText}>{selectedFile ? selectedFile.name : 'Pick Book (PDF/EPUB)'}</Text>
+      <TouchableOpacity 
+        style={[styles.fileButton, selectedFile && styles.fileButtonSelected]} 
+        onPress={handlePickDocument}
+      >
+        <Text style={[styles.fileButtonText, selectedFile && styles.fileButtonTextSelected]}>
+          {selectedFile ? `✓ ${selectedFile.name}` : '📎 Pick Book (PDF)'}
+        </Text>
       </TouchableOpacity>
-      {parsedPageCount > 0 && <Text style={styles.pageCountText}>Pages: {parsedPageCount}</Text>}
+      
+      {parsedPageCount > 0 && (
+        <Text style={styles.pageCountText}>✓ {parsedPageCount} Pages Parsed</Text>
+      )}
 
       <TouchableOpacity 
         style={[styles.submitButton, (!isFormValid || loading) && styles.submitButtonDisabled]} 
         onPress={handleSubmit} 
         disabled={!isFormValid || loading}
       >
-        {loading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitButtonText}>Create Group & Upload</Text>}
+        {loading ? (
+          <ActivityIndicator color="#FFF" />
+        ) : (
+          <Text style={styles.submitButtonText}>Create Group & Upload</Text>
+        )}
       </TouchableOpacity>
     </ScrollView>
   );
@@ -191,7 +276,9 @@ const styles = StyleSheet.create({
   dayText: { color: '#333', fontWeight: 'bold' },
   dayTextActive: { color: '#FFF' },
   fileButton: { backgroundColor: '#E2EEFF', padding: 15, borderRadius: 8, marginTop: 20, borderStyle: 'dashed', borderWidth: 1, borderColor: '#007BFF' },
+  fileButtonSelected: { backgroundColor: '#D4EDDA', borderColor: '#28A745' },
   fileButtonText: { color: '#007BFF', textAlign: 'center', fontWeight: 'bold' },
+  fileButtonTextSelected: { color: '#28A745' },
   pageCountText: { textAlign: 'center', color: '#28A745', marginTop: 5, fontWeight: 'bold' },
   submitButton: { backgroundColor: '#007BFF', padding: 18, borderRadius: 8, marginTop: 40, alignItems: 'center', marginBottom: 50 },
   submitButtonDisabled: { backgroundColor: '#A0CFFF' },

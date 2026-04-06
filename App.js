@@ -3,6 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { supabase } from './src/supabase';
 
+// Screens
 import AuthScreen from './src/screens/AuthScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 import CreateGroupScreen from './src/screens/CreateGroupScreen';
@@ -10,30 +11,33 @@ import JoinGroupScreen from './src/screens/JoinGroupScreen';
 import ReaderScreen from './src/screens/ReaderScreen';
 
 const Stack = createNativeStackNavigator();
-console.log("Testing Join Screen Import:", JoinGroupScreen);
+
 export default function App() {
   const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check active session on mount
+    // 1. Check active session on mount
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
+      setLoading(false);
     });
 
-    // Listen for auth state changes (login, logout, token refresh)
+    // 2. Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
 
-    // Cleanup subscription on unmount
     return () => subscription?.unsubscribe();
   }, []);
+
+  if (loading) return null; // Or a splash screen
 
   return (
     <NavigationContainer>
       <Stack.Navigator>
         {session && session.user ? (
-          // USER IS LOGGED IN: Grant access to the Dashboard and App features
+          // --- PROTECTED ROUTES (User is logged in) ---
           <>
             <Stack.Screen
               name="Dashboard"
@@ -45,21 +49,25 @@ export default function App() {
               component={CreateGroupScreen}
               options={{ headerTitle: 'Initialize Group' }}
             />
+            <Stack.Screen
+              name="JoinGroup"
+              component={JoinGroupScreen}
+              options={{ headerTitle: 'Join Group' }}
+            />
+            <Stack.Screen 
+              name="Reader" 
+              component={ReaderScreen} 
+              options={{ headerShown: false }} 
+            />
           </>
         ) : (
-          // USER IS NOT LOGGED IN: Lock them to the Auth Screen
+          // --- AUTH ROUTES (User is logged out) ---
           <Stack.Screen
             name="Auth"
             component={AuthScreen}
             options={{ headerShown: false }}
           />
         )}
-        <Stack.Screen
-          name="JoinGroup"
-          component={JoinGroupScreen}
-          options={{ headerTitle: 'Join Group' }}
-        />
-        <Stack.Screen name="Reader" component={ReaderScreen} options={{ headerShown: false }} />
       </Stack.Navigator>
     </NavigationContainer>
   );

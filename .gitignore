@@ -39,3 +39,18 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+
+node_modules/
+.expo/
+dist/
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Native folders (EAS handles these)
+android/
+ios/
+
+# Sensitive data
+.env
