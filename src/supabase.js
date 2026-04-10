@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 
 // YOUR NEW IP
-export const laptopIp = '192.168.86.231'; 
+export const laptopIp = '192.168.43.172'; 
 
 export const supabaseUrl = `http://${laptopIp}:8000`;
 

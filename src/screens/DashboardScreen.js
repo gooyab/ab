@@ -9,10 +9,8 @@ export default function DashboardScreen() {
   const navigation = useNavigation();
 
   useEffect(() => {
-    // 1. Initial Fetch
     fetchMyGroups();
 
-    // 2. Realtime Listener: Refreshes list when you join/create a group
     const channel = supabase
       .channel('dashboard-updates')
       .on(
@@ -22,8 +20,7 @@ export default function DashboardScreen() {
           schema: 'public',
           table: 'group_members',
         },
-        (payload) => {
-          console.log('Realtime change detected!', payload);
+        () => {
           fetchMyGroups(); 
         }
       )
@@ -39,7 +36,7 @@ export default function DashboardScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Query includes 'books' join to get the file_path for the reader
+      // FIX: Now selecting 'book_id' inside the books join
       const { data, error } = await supabase
         .from('groups')
         .select(`
@@ -49,7 +46,7 @@ export default function DashboardScreen() {
           meeting_time,
           meeting_days,
           group_members!inner(user_id),
-          books(file_path)
+          books(book_id, file_path)
         `)
         .eq('group_members.user_id', user.id);
 
@@ -64,7 +61,6 @@ export default function DashboardScreen() {
 
   return (
     <View style={styles.container}>
-      {/* HEADER */}
       <View style={styles.header}>
         <Text style={styles.title}>My Groups</Text>
         <View style={styles.headerButtons}>
@@ -74,7 +70,7 @@ export default function DashboardScreen() {
           >
             <Text style={styles.actionButtonText}>Join</Text>
           </TouchableOpacity>
-          
+            
           <TouchableOpacity 
             style={[styles.actionButton, styles.createButton]} 
             onPress={() => navigation.navigate('CreateGroup')}
@@ -94,33 +90,36 @@ export default function DashboardScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>You haven't joined any groups yet.</Text>
-              <Text style={styles.emptySubText}>Create one or use an invite code to join!</Text>
             </View>
           }
-          renderItem={({ item }) => (
-            <TouchableOpacity 
-              style={styles.groupCard}
-              onPress={() => navigation.navigate('Reader', { 
-                bookId: item.group_id, 
-                filePath: item.books?.[0]?.file_path 
-              })}
-            >
-              <View style={styles.cardInfo}>
-                <Text style={styles.groupTitle}>{item.title}</Text>
-                <Text style={styles.groupDetail}>
-                  {item.meeting_days?.join(', ')} at {item.meeting_time}
-                </Text>
-                <Text style={styles.capacityText}>Max Capacity: {item.capacity} members</Text>
-              </View>
-              <View style={styles.chevron}>
-                <Text style={{ color: '#CCC', fontSize: 20 }}>{'>'}</Text>
-              </View>
-            </TouchableOpacity>
-          )}
+          renderItem={({ item }) => {
+            // Get the book details from the joined array
+            const book = item.books?.[0];
+            
+            return (
+              <TouchableOpacity 
+                style={styles.groupCard}
+                onPress={() => navigation.navigate('Reader', { 
+                  bookId: book?.book_id, // PASSING THE ACTUAL BOOK_ID
+                  filePath: book?.file_path,
+                  isAdmin: true
+                })}
+              >
+                <View style={styles.cardInfo}>
+                  <Text style={styles.groupTitle}>{item.title}</Text>
+                  <Text style={styles.groupDetail}>
+                    {item.meeting_days?.join(', ')} at {item.meeting_time}
+                  </Text>
+                </View>
+                <View style={styles.chevron}>
+                  <Text style={{ color: '#CCC', fontSize: 20 }}>{'>'}</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          }}
         />
       )}
 
-      {/* SIGN OUT */}
       <TouchableOpacity style={styles.signOutButton} onPress={() => supabase.auth.signOut()}>
         <Text style={styles.signOutButtonText}>Sign Out</Text>
       </TouchableOpacity>
@@ -139,24 +138,13 @@ const styles = StyleSheet.create({
   actionButtonText: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
   emptyContainer: { alignItems: 'center', marginTop: 60 },
   emptyText: { color: '#666', fontSize: 16, fontWeight: '500' },
-  emptySubText: { color: '#999', fontSize: 14, marginTop: 5 },
   groupCard: { 
-    backgroundColor: '#FFF', 
-    padding: 18, 
-    borderRadius: 15, 
-    marginBottom: 15, 
-    flexDirection: 'row',
-    alignItems: 'center',
-    elevation: 3, 
-    shadowColor: '#000', 
-    shadowOffset: { width: 0, height: 2 }, 
-    shadowOpacity: 0.1, 
-    shadowRadius: 5 
+    backgroundColor: '#FFF', padding: 18, borderRadius: 15, marginBottom: 15, 
+    flexDirection: 'row', alignItems: 'center', elevation: 3 
   },
   cardInfo: { flex: 1 },
   groupTitle: { fontSize: 19, fontWeight: 'bold', color: '#007BFF' },
   groupDetail: { color: '#444', marginTop: 4, fontSize: 15 },
-  capacityText: { color: '#888', fontSize: 12, marginTop: 6 },
   chevron: { marginLeft: 10 },
   signOutButton: { 
     position: 'absolute', bottom: 30, left: 20, right: 20, 

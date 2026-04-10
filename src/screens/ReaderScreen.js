@@ -1,75 +1,183 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  StyleSheet,
-  View,
-  Text,
-  TouchableOpacity,
-  Dimensions,
-  Alert,
-  ActivityIndicator
+  StyleSheet, View, Text, TouchableOpacity, Dimensions, Alert, ActivityIndicator
 } from 'react-native';
 import Pdf from 'react-native-pdf';
 import { supabase, supabaseUrl } from '../supabase';
 
 export default function ReaderScreen({ route }) {
-  const { bookId, filePath } = route.params;
+  const { bookId, filePath, isAdmin } = route.params;
 
+  const [pins, setPins] = useState([]);
   const [isHighlightMode, setIsHighlightMode] = useState(false);
+  const [isRevealed, setIsRevealed] = useState(false);
+  const [sessionStatus, setSessionStatus] = useState('Inactive');
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [loadingProgress, setLoadingProgress] = useState(0);
+  
+  // NEW: State to store the PDF's internal point width (e.g., 612 for A4)
+  const [pdfInternalWidth, setPdfInternalWidth] = useState(0);
 
+  const screenWidth = Dimensions.get('window').width;
   const pdfRef = useRef(null);
 
-  // --- THE FINAL URL LOGIC ---
-  const cleanPath = decodeURIComponent(filePath);
-  const safePath = encodeURIComponent(cleanPath);
-  const baseUrl = supabaseUrl.replace('localhost', '192.168.86.211');
+  useEffect(() => {
+    loadInitialData();
 
-  // Construct the final URI pointing to James's Port 8000 gateway
-  const correctedUri = `${baseUrl}/storage/v1/object/public/Books/${safePath}`;
+    // 1. Realtime Pin Listener
+    const pinChannel = supabase
+      .channel('realtime-pins')
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'highlights',
+        filter: `book_id=eq.${bookId}`
+      }, (payload) => {
+        setPins((prev) => {
+          const exists = prev.some(p => p.id === payload.new.id);
+          if (exists) return prev;
+          return [...prev, payload.new];
+        });
+      })
+      .subscribe();
 
-const source = { 
-  uri: "http://192.168.86.231:8000/storage/v1/object/public/Books/1775315212783_collie_rob_singh_avi__power_pivot_and_power_bi_the_excel_users_guide_to_dax_power_query_power_bi__power_pivot_in_excel_20102016_2016_holy_macro_books__libgenli.pdf",
-  cache: false 
-};
+    // 2. Realtime Session Listener
+    const sessionChannel = supabase
+      .channel('session-status')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'live_sessions',
+        filter: `book_id=eq.${bookId}`
+      }, (payload) => {
+        const { status, is_revealed } = payload.new;
+        setSessionStatus(status);
+        setIsRevealed(is_revealed);
+        fetchVisiblePins();
+      })
+      .subscribe();
 
-  // COORDINATE SAVER (James's Feature)
+    return () => {
+      supabase.removeChannel(pinChannel);
+      supabase.removeChannel(sessionChannel);
+    };
+  }, [bookId]);
+
+  const loadInitialData = async () => {
+    const { data: session } = await supabase
+      .from('live_sessions')
+      .select('is_revealed, status')
+      .eq('book_id', bookId)
+      .single();
+
+    if (session) {
+      setIsRevealed(session.is_revealed);
+      setSessionStatus(session.status);
+    }
+    fetchVisiblePins();
+  };
+
+  const fetchVisiblePins = async () => {
+    const { data, error } = await supabase
+      .from('highlights')
+      .select('*')
+      .eq('book_id', bookId);
+
+    if (!error) setPins(data || []);
+  };
+
+const handleToggleSession = async () => {
+    const isStarting = sessionStatus !== 'Active';
+
+    console.log("Attempting to toggle session for book:", bookId);
+
+    // FIX: Using .upsert() instead of .update() ensures the row exists
+    const { data, error } = await supabase
+      .from('live_sessions')
+      .upsert({ 
+        book_id: bookId, // This links the session to the book
+        status: isStarting ? 'Active' : 'Inactive', 
+        is_revealed: isStarting 
+      }, { onConflict: 'book_id' }) // If book_id exists, just update it
+      .select();
+
+    if (error) {
+      console.error("Session Toggle Error:", error.message);
+      Alert.alert("Admin Error", `Database rejected the update: ${error.message}`);
+    } else {
+      console.log("Database updated successfully:", data);
+    }
+  };
+
   const handlePageTap = async (page, x, y) => {
     if (!isHighlightMode) return;
 
     try {
       const { data: { user } } = await supabase.auth.getUser();
 
-      const { error } = await supabase
-        .from('highlights')
-        .insert({
-          book_id: bookId,
-          user_id: user.id,
-          page_number: page,
-          content: "Pinned Coordinate",
-          coordinates: { x: Math.round(x), y: Math.round(y) }
-        });
-
-      if (error) throw error;
-      Alert.alert("Saved!", `Pinned at {${Math.round(x)}, ${Math.round(y)}} on page ${page}`);
+      // THE FIX: We send 'pdfInternalWidth' as the base 'w'.
+      // This ensures James's DB trigger calculates percentages correctly.
+      await supabase.from('highlights').insert({
+        book_id: bookId,
+        user_id: user.id,
+        page_number: page,
+        content: "Pinned Coordinate",
+        highlight_coordinates: {
+          x: Math.round(x),
+          y: Math.round(y),
+          w: Math.round(pdfInternalWidth), 
+          h: 0 
+        },
+        color_code: "#FFD700"
+      });
     } catch (err) {
-      console.error("Save Error:", err.message);
-      Alert.alert("Save Error", "Could not connect to the highlights table.");
+      Alert.alert("Save Error", err.message);
     }
   };
 
+  const renderMarkers = () => {
+    return pins
+      .filter(p => p.page_number === currentPage)
+      .map((pin, index) => {
+        // Responsively map the percentage back to YOUR current screen width
+        const responsiveX = (pin.x_pct / 100) * screenWidth;
+        const responsiveY = (pin.y_pct / 100) * Dimensions.get('window').height;
+
+        return (
+          <View
+            key={`pin-${pin.id || index}`}
+            style={[
+              styles.pinMarker,
+              {
+                left: responsiveX - 15,
+                top: responsiveY - 15,
+                backgroundColor: pin.color_code
+              }
+            ]}
+          >
+            <Text style={{ fontSize: 16 }}>📍</Text>
+          </View>
+        );
+      });
+  };
+
+  const correctedUri = `${supabaseUrl}/storage/v1/object/public/Books/${encodeURIComponent(decodeURIComponent(filePath))}`;
+
   return (
     <View style={styles.container}>
-      {/* HEADER TOOLBAR */}
       <View style={styles.toolbar}>
         <View>
           <Text style={styles.pageIndicator}>Page {currentPage} / {totalPages || '...'}</Text>
-          {isLoading && (
-            <Text style={styles.progressText}>
-              Streaming: {Math.round(loadingProgress * 100)}%
-            </Text>
+          {isAdmin && (
+            <TouchableOpacity
+              onPress={handleToggleSession}
+              style={[styles.adminToggle, sessionStatus === 'Active' ? styles.activeBtn : styles.inactiveBtn]}
+            >
+              <Text style={styles.adminToggleText}>
+                {sessionStatus === 'Active' ? "🔴 END SESSION" : "🚀 START SESSION"}
+              </Text>
+            </TouchableOpacity>
           )}
         </View>
 
@@ -77,103 +185,59 @@ const source = {
           style={[styles.modeButton, isHighlightMode && styles.modeButtonActive]}
           onPress={() => setIsHighlightMode(!isHighlightMode)}
         >
-          <Text style={styles.buttonText}>
-            {isHighlightMode ? '📍 PIN MODE' : '🖐️ SCROLL MODE'}
-          </Text>
+          <Text style={styles.buttonText}>{isHighlightMode ? '📍 PIN MODE' : '🖐️ SCROLL MODE'}</Text>
         </TouchableOpacity>
       </View>
 
-      {/* THE PDF COMPONENT */}
-      <Pdf
-        ref={pdfRef}
-        source={source}
-        // FIX: Set to false for HTTP connections to avoid "Trust Manager" Java errors
-        trustAllCerts={false}
-        onLoadProgress={(percent) => {
-          setLoadingProgress(percent);
-          console.log(`Stream Progress: ${Math.round(percent * 100)}%`);
-        }}
-        onLoadComplete={(numberOfPages) => {
-          setTotalPages(numberOfPages);
-          setIsLoading(false);
-          console.log(`SUCCESS: Rendered ${numberOfPages} pages.`);
-        }}
-        onPageChanged={(page) => setCurrentPage(page)}
-        onPageSingleTap={(page, x, y) => handlePageTap(page, x, y)}
-        onError={(error) => {
-          setIsLoading(false);
-          console.log('PDF Render Error:', error);
-          Alert.alert(
-            "Reader Error",
-            "The file could not be displayed. Ensure James has the 'Books' bucket set to Public."
-          );
-        }}
-        style={styles.pdf}
-        enableAntialiasing={true}
-        fitPolicy={0}
-      />
+      <View style={{ flex: 1 }}>
+        <Pdf
+          ref={pdfRef}
+          source={{ uri: correctedUri }}
+          trustAllCerts={false}
+          onLoadComplete={(num, path, { width }) => { 
+            setTotalPages(num); 
+            setPdfInternalWidth(width); // Capture internal PDF width
+            setIsLoading(false); 
+          }}
+          onPageChanged={(p) => setCurrentPage(p)}
+          onPageSingleTap={(p, x, y) => handlePageTap(p, x, y)}
+          style={styles.pdf}
+          fitPolicy={0} 
+        />
 
-      {/* LOADING OVERLAY */}
-      {isLoading && (
-        <View style={styles.loaderContainer}>
-          <ActivityIndicator size="large" color="#007BFF" />
-          <Text style={styles.loaderText}>Bypassing the 'Double-Lock'...</Text>
-        </View>
-      )}
-
-      {/* MODE INSTRUCTIONS */}
-      {isHighlightMode && !isLoading && (
-        <View style={styles.instructions}>
-          <Text style={styles.instructionText}>Tap page to save coordinates for James</Text>
-        </View>
-      )}
+        {!isLoading && (
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {renderMarkers()}
+          </View>
+        )}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#121212' },
-  pdf: {
-    flex: 1,
-    width: Dimensions.get('window').width,
-    height: Dimensions.get('window').height,
-    backgroundColor: '#121212',
-  },
-  toolbar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 50,
-    paddingBottom: 15,
-    backgroundColor: '#FFF',
-    elevation: 4,
-  },
-  pageIndicator: { fontWeight: 'bold', fontSize: 16, color: '#333' },
-  progressText: { fontSize: 10, color: '#007BFF', fontWeight: 'bold' },
-  modeButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-    backgroundColor: '#F0F0F0'
-  },
+  pdf: { flex: 1, width: Dimensions.get('window').width, height: Dimensions.get('window').height },
+  toolbar: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 50, paddingBottom: 15, backgroundColor: '#FFF' },
+  pageIndicator: { fontWeight: 'bold', fontSize: 16 },
+  modeButton: { padding: 10, borderRadius: 20, backgroundColor: '#F0F0F0' },
   modeButtonActive: { backgroundColor: '#FFD700' },
-  buttonText: { fontWeight: 'bold', fontSize: 12 },
-  loaderContainer: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(255,255,255,0.9)',
+  buttonText: { fontWeight: 'bold' },
+  adminToggle: { marginTop: 5, padding: 6, borderRadius: 5, alignItems: 'center' },
+  activeBtn: { backgroundColor: '#DC3545' },
+  inactiveBtn: { backgroundColor: '#28A745' },
+  adminToggleText: { color: '#FFF', fontSize: 10, fontWeight: 'bold' },
+  pinMarker: {
+    position: 'absolute',
+    width: 30,
+    height: 30,
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 10
+    borderRadius: 15,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
-  loaderText: { marginTop: 10, fontWeight: '600', color: '#555' },
-  instructions: {
-    position: 'absolute',
-    bottom: 40,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    padding: 12,
-    borderRadius: 20
-  },
-  instructionText: { color: '#FFF', fontWeight: 'bold', fontSize: 12 }
 });

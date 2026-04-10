@@ -13,7 +13,11 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.BookClubApp",
+      "infoPlist": {
+        "NSCameraUsageDescription": "BookClubApp needs access to your camera to scan QR codes for joining groups."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -22,8 +26,21 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.anonymous.BookClubApp",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
     },
+    "plugins": [
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "BookClubApp needs access to your camera to scan join codes."
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
     },
