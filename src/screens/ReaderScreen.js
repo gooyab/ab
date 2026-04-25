@@ -89,24 +89,44 @@ export default function ReaderScreen({ route }) {
 
 const handleToggleSession = async () => {
     const isStarting = sessionStatus !== 'Active';
-
     console.log("Attempting to toggle session for book:", bookId);
 
-    // FIX: Using .upsert() instead of .update() ensures the row exists
-    const { data, error } = await supabase
+    // 1. Try to UPDATE the session first
+    const { data: updateData, error: updateError } = await supabase
       .from('live_sessions')
-      .upsert({ 
-        book_id: bookId, // This links the session to the book
+      .update({ 
         status: isStarting ? 'Active' : 'Inactive', 
         is_revealed: isStarting 
-      }, { onConflict: 'book_id' }) // If book_id exists, just update it
+      })
+      .eq('book_id', bookId)
       .select();
 
-    if (error) {
-      console.error("Session Toggle Error:", error.message);
-      Alert.alert("Admin Error", `Database rejected the update: ${error.message}`);
+    if (updateError) {
+      console.error("Update Error:", updateError.message);
+      Alert.alert("Error", updateError.message);
+      return;
+    }
+
+    // 2. If the update affected 0 rows, it means the session doesn't exist yet, so we INSERT it
+    if (updateData && updateData.length === 0) {
+      console.log("No session found, creating a new one...");
+      const { data: insertData, error: insertError } = await supabase
+        .from('live_sessions')
+        .insert({ 
+          book_id: bookId, 
+          status: isStarting ? 'Active' : 'Inactive', 
+          is_revealed: isStarting 
+        })
+        .select();
+
+      if (insertError) {
+        console.error("Insert Error:", insertError.message);
+        Alert.alert("Creation Error", insertError.message);
+      } else {
+        console.log("Session created successfully:", insertData);
+      }
     } else {
-      console.log("Database updated successfully:", data);
+      console.log("Session updated successfully:", updateData);
     }
   };
 
